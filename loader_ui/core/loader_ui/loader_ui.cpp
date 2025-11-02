@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <string_view>
+
 static c_imgui_manager* imgui_manager = nullptr;
 
 c_loader_ui::c_loader_ui()
@@ -79,6 +80,8 @@ void c_loader_ui::render() {
         return;
     }
 
+    render_auth_mode_window();
+
     if (state.show_login_window) {
         render_login_window();
     }
@@ -93,6 +96,52 @@ void c_loader_ui::render() {
 
     imgui_manager->render();
     imgui_manager->present();
+}
+
+void c_loader_ui::render_auth_mode_window() {
+    if (!initialized || !imgui_manager) {
+        return;
+    }
+
+    ImVec2 window_pos((float)GetSystemMetrics(SM_CXSCREEN) - 10.0f,
+        10.0f);
+    ImVec2 pivot(1.0f, 0.0f);
+    ImGui::SetNextWindowPos(window_pos, ImGuiCond_Always, pivot);
+    ImGui::SetNextWindowBgAlpha(0.85f);
+    ImGui::SetNextWindowSize(ImVec2(220.0f, 70.0f), ImGuiCond_FirstUseEver);
+
+    if (ImGui::Begin("Authentication Mode##auth_mode_window",
+        nullptr,
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_AlwaysAutoResize)) {
+
+        bool mode = state.license_only_mode;
+        if (ImGui::Checkbox("License-only login", &mode)) {
+            state.license_only_mode = mode;
+            if (auth_mode_callback) {
+                auth_mode_callback(mode);
+            }
+
+            if (mode) {
+                if (!state.authenticated) {
+                    show_main();
+                }
+            }
+            else {
+                if (!state.authenticated) {
+                    show_login();
+                }
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::TextUnformatted(mode
+            ? "Uses stored local account"
+            : "Manual username/password");
+    }
+    ImGui::End();
 }
 
 void c_loader_ui::render_login_window() {
@@ -429,14 +478,26 @@ void c_loader_ui::apply_base_theme() {
 void c_loader_ui::set_authenticated(bool auth, user_profile* new_profile) {
     state.authenticated = auth;
 
-    if (new_profile != nullptr)
+    if (new_profile != nullptr) {
         user = *new_profile;
+    }
 
     if (state.authenticated) {
+        products_dirty = true;
         show_main();
     }
     else {
-        show_login();
+        release_product_views();
+        products_dirty = false;
+        user.subscriptions.clear();
+        if (state.license_only_mode) {
+            state.show_login_window = false;
+            state.show_register_window = false;
+            state.show_main_window = true;
+        }
+        else {
+            show_login();
+        }
     }
 }
 
@@ -451,22 +512,58 @@ void c_loader_ui::set_error_message(const std::string& message) {
     state.status_message.clear();
 }
 
+void c_loader_ui::set_loading(bool active) {
+
+}
+
 void c_loader_ui::show_login() {
-    state.show_login_window = true;
-    state.show_register_window = false;
-    state.show_main_window = false;
+    if (state.license_only_mode) {
+        state.show_login_window = false;
+        state.show_register_window = false;
+        state.show_main_window = true;
+    }
+    else {
+        state.show_login_window = true;
+        state.show_register_window = false;
+        state.show_main_window = false;
+    }
 }
 
 void c_loader_ui::show_register() {
-    state.show_login_window = false;
-    state.show_register_window = true;
-    state.show_main_window = false;
+    if (state.license_only_mode) {
+        state.show_login_window = false;
+        state.show_register_window = false;
+        state.show_main_window = true;
+    }
+    else {
+        state.show_login_window = false;
+        state.show_register_window = true;
+        state.show_main_window = false;
+    }
 }
 
 void c_loader_ui::show_main() {
     state.show_login_window = false;
     state.show_register_window = false;
     state.show_main_window = true;
+}
+
+void c_loader_ui::set_local_account_username(const std::string& username) {
+    user.username = username;
+}
+
+void c_loader_ui::set_license_only_mode(bool enabled) {
+    state.license_only_mode = enabled;
+    if (enabled) {
+        if (!state.authenticated) {
+            show_main();
+        }
+    }
+    else {
+        if (!state.authenticated) {
+            show_login();
+        }
+    }
 }
 
 void c_loader_ui::set_login_callback(LoginCallback callback) {
@@ -489,11 +586,68 @@ void c_loader_ui::set_filestream_callback(FilestreamCallback callback) {
     filestream_callback = callback;
 }
 
+void c_loader_ui::set_auth_mode_callback(AuthModeCallback callback) {
+    auth_mode_callback = callback;
+}
+
+void c_loader_ui::handle_login_request(const std::string& username, const std::string& password) {
+    if (login_callback) {
+        login_callback(username, password);
+    }
+}
+
+void c_loader_ui::handle_register_request(const std::string& username, const std::string& password, const std::string& license) {
+    if (register_callback) {
+        register_callback(username, password, license);
+    }
+}
+
+void c_loader_ui::handle_launch_request(const std::string& file_id) {
+    if (filestream_callback && !file_id.empty()) {
+        filestream_callback(file_id);
+    }
+}
+
+void c_loader_ui::handle_license_redeem(const std::string& license) {
+    if (license_callback && !user.username.empty() && !license.empty()) {
+        license_callback(user.username, license);
+    }
+}
+
+const std::vector<c_loader_ui::product_view>& c_loader_ui::get_product_views() const {
+    return products;
+}
+
+void c_loader_ui::release_product_views() {
+
+}
+
+void c_loader_ui::initialize_fallback_icons() {
+
+}
+
+void c_loader_ui::release_fallback_icons() {
+    auto release_icon = [&](ID3D11ShaderResourceView*& slot,
+        ID3D11ShaderResourceView*& fallback_slot,
+        std::string_view name) {
+            if (!fallback_slot) {
+                return;
+            }
+
+            if (slot == fallback_slot) {
+                slot = nullptr;
+            }
+
+            fallback_slot->Release();
+            fallback_slot = nullptr;
+        };
+}
+
+void c_loader_ui::rebuild_product_views() {
+}
+
 void c_loader_ui::close() {
     should_close = true;
-    if (imgui_manager) {
-        imgui_manager->set_should_close(true);
-    }
 }
 
 static void(*g_login_callback)(const char*, const char*) = nullptr;
@@ -501,6 +655,7 @@ static void(*g_register_callback)(const char*, const char*, const char*) = nullp
 static void(*g_license_callback)(const char*, const char*) = nullptr;
 static void(*g_exit_callback)() = nullptr;
 static void (*g_filestream_callback)(const char*) = nullptr;
+static void(*g_auth_mode_callback)(bool) = nullptr;
 
 extern "C" {
     LOADER_UI_API c_loader_ui* create_loader_ui() {
@@ -550,8 +705,41 @@ extern "C" {
         if (ui) ui->set_error_message(message ? message : "");
     }
 
+    LOADER_UI_API void ui_set_loading(c_loader_ui* ui, bool loading) {
+        if (ui) ui->set_loading(loading);
+    }
+
     LOADER_UI_API void ui_close(c_loader_ui* ui) {
         if (ui) ui->close();
+    }
+
+    LOADER_UI_API void ui_set_local_account(c_loader_ui* ui, const char* username) {
+        if (ui && username) {
+            ui->set_local_account_username(username);
+        }
+    }
+
+    LOADER_UI_API void ui_set_license_only_mode(c_loader_ui* ui, bool enabled) {
+        if (ui) {
+            ui->set_license_only_mode(enabled);
+        }
+    }
+
+    LOADER_UI_API void ui_set_auth_mode_callback(c_loader_ui* ui, void(*callback)(bool)) {
+        if (!ui) return;
+
+        g_auth_mode_callback = callback;
+
+        if (callback) {
+            ui->set_auth_mode_callback([](bool enabled) {
+                if (g_auth_mode_callback) {
+                    g_auth_mode_callback(enabled);
+                }
+                });
+        }
+        else {
+            ui->set_auth_mode_callback(nullptr);
+        }
     }
 
     LOADER_UI_API void ui_set_login_callback(c_loader_ui* ui, void(*callback)(const char*, const char*)) {
@@ -632,7 +820,7 @@ extern "C" {
         g_filestream_callback = callback;
 
         if (callback) {
-            ui->set_filestream_callback([]( const std::string& file_id)
+            ui->set_filestream_callback([](const std::string& file_id)
                 {
                     if (g_filestream_callback) {
                         g_filestream_callback(file_id.c_str());
