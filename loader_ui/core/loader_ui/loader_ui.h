@@ -7,6 +7,7 @@
 #include <vector>
 #include <memory>
 #include <filesystem>
+#include <chrono>
 
 // DLL export/import macros - respect static builds
 #ifdef _WIN32
@@ -39,6 +40,7 @@ struct user_subscription {
     std::string plan;
     std::string expires_at;
     std::string status;
+    bool frozen = false;
     std::string plan_id;
     std::string default_file_id;
     std::string product_image_mime;
@@ -88,6 +90,28 @@ public:
     };
 
 private:
+    enum class banner_kind {
+        none,
+        info,
+        success,
+        error,
+        loading,
+        prompt
+    };
+
+    struct banner_state {
+        banner_kind kind = banner_kind::none;
+        std::string text;
+        std::chrono::steady_clock::time_point start_time{};
+        float duration = 0.f;
+        bool auto_clear = false;
+
+        bool has_follow_up = false;
+        banner_kind follow_up_kind = banner_kind::none;
+        std::string follow_up_text;
+        float follow_up_duration = 0.f;
+        bool follow_up_auto_clear = false;
+    };
 
     // Callback functions
     LoginCallback login_callback;
@@ -115,6 +139,47 @@ private:
     void render_main_window();
     void render_auth_mode_window();
     static void apply_base_theme();
+
+    void show_banner(banner_kind kind, const std::string& text, float duration = 0.f, bool auto_clear = false);
+    void show_banner_with_follow_up(banner_kind kind,
+        const std::string& text,
+        float duration,
+        bool auto_clear,
+        banner_kind follow_up_kind,
+        const std::string& follow_up_text,
+        float follow_up_duration,
+        bool follow_up_auto_clear);
+    void update_banner();
+    banner_state banner_;
+
+    // License redemption feedback
+    bool license_redeem_pending_ = false;
+    bool license_success_active_ = false;
+    std::chrono::steady_clock::time_point license_success_start_{};
+    std::string license_success_message_;
+    inline static constexpr float kLicenseBannerDuration = 5.0f;
+
+    // Load animation and completion popup
+    bool load_animation_active_ = false;
+    std::chrono::steady_clock::time_point load_animation_start_{};
+    std::string load_animation_product_;
+    bool load_completion_popup_pending_ = false;
+    std::string load_completion_message_;
+    bool load_animation_stop_requested_ = false;
+    inline static constexpr float kLoadAnimationDuration = 5.0f;
+    user_subscription* selected_subscription_snapshot_ = nullptr;
+
+    // Pending file launch coordination
+    std::string pending_file_id_;
+    std::string pending_product_name_;
+    bool download_start_enqueued_ = false;
+    std::chrono::steady_clock::time_point download_delay_until_{};
+
+    // Actual download progress (post-confirmation)
+    bool download_active_ = false;
+    float download_progress_ = 0.f;
+
+    void trigger_pending_download();
 public:
     c_loader_ui();
     ~c_loader_ui();
@@ -156,6 +221,7 @@ public:
 
     // Utility
     void close();
+    void set_loading_progress(float progress);
 };
 
 // C-style exported functions for DLL interface
@@ -171,6 +237,7 @@ extern "C" {
     LOADER_UI_API void ui_set_status_message(c_loader_ui* ui, const char* message);
     LOADER_UI_API void ui_set_error_message(c_loader_ui* ui, const char* message);
     LOADER_UI_API void ui_set_loading(c_loader_ui* ui, bool loading);
+    LOADER_UI_API void ui_set_loading_progress(c_loader_ui* ui, float progress);
     LOADER_UI_API void ui_close(c_loader_ui* ui);
     LOADER_UI_API void ui_set_local_account(c_loader_ui* ui, const char* username);
     LOADER_UI_API void ui_set_license_only_mode(c_loader_ui* ui, bool enabled);

@@ -108,10 +108,10 @@ void c_imgui_manager::initalize_fonts() {
     ImGuiIO& io = ImGui::GetIO();
 
     //First font pushed is default font
-    fonts.push_back(new font_object(nullptr, "normal", "c:\\Windows\\Fonts\\bahnschrift.ttf", 16.f));
-    fonts.push_back(new font_object(nullptr, "title", "c:\\Windows\\Fonts\\bahnschrift.ttf", 24.f));
-    fonts.push_back(new font_object(nullptr, "smalltitle", "c:\\Windows\\Fonts\\bahnschrift.ttf", 20.f));
-    fonts.push_back(new font_object(nullptr, "subtitle", "c:\\Windows\\Fonts\\bahnschrift.ttf", 12.f));
+    fonts.push_back(new font_object(nullptr, "normal", "c:\\Windows\\Fonts\\bahnschrift.ttf", 14.f));
+    fonts.push_back(new font_object(nullptr, "title", "c:\\Windows\\Fonts\\bahnschrift.ttf", 22.f));
+    fonts.push_back(new font_object(nullptr, "smalltitle", "c:\\Windows\\Fonts\\bahnschrift.ttf", 18.f));
+    fonts.push_back(new font_object(nullptr, "subtitle", "c:\\Windows\\Fonts\\bahnschrift.ttf", 10.f));
 
     for (auto font : fonts) {
         font->font = io.Fonts->AddFontFromFileTTF(font->font_path, font->size, NULL, io.Fonts->GetGlyphRangesDefault());

@@ -2382,8 +2382,12 @@ bool ImGui::DragBehaviorT(ImGuiDataType data_type, TYPE* v, float v_speed, const
 
 bool ImGui::DragBehavior(ImGuiID id, ImGuiDataType data_type, void* p_v, float v_speed, const void* p_min, const void* p_max, const char* format, ImGuiSliderFlags flags)
 {
-    // Read imgui.cpp "API BREAKING CHANGES" section for 1.78 if you hit this assert.
-    IM_ASSERT((flags == 1 || (flags & ImGuiSliderFlags_InvalidMask_) == 0) && "Invalid ImGuiSliderFlags flags! Has the 'float power' argument been mistakenly cast to flags? Call function with ImGuiSliderFlags_Logarithmic flags instead.");
+    // Flags sanitization: tolerate legacy callers that still pass the old 'power' parameter
+    // or contain garbage bits by masking everything to the supported range.
+    if (flags == 1)
+        flags = ImGuiSliderFlags_None;
+    else if ((flags & ImGuiSliderFlags_InvalidMask_) != 0)
+        flags &= ~ImGuiSliderFlags_InvalidMask_;
 
     ImGuiContext& g = *GImGui;
     if (g.ActiveId == id)

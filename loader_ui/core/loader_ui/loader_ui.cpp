@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <string_view>
+#include "../dep/imgui/imgui_internal.h"
 
 static c_imgui_manager* imgui_manager = nullptr;
 
@@ -49,6 +50,21 @@ void c_loader_ui::shutdown() {
     }
 
     state = ui_state{};
+    license_redeem_pending_ = false;
+    license_success_active_ = false;
+    license_success_message_.clear();
+    load_animation_active_ = false;
+    load_completion_popup_pending_ = false;
+    load_animation_product_.clear();
+    load_completion_message_.clear();
+    load_animation_stop_requested_ = false;
+    selected_subscription_snapshot_ = nullptr;
+    pending_file_id_.clear();
+    pending_product_name_.clear();
+    download_start_enqueued_ = false;
+    download_delay_until_ = {};
+    download_active_ = false;
+    download_progress_ = 0.f;
 
     if (imgui_manager) {
         imgui_manager->shutdown();
@@ -75,6 +91,64 @@ void c_loader_ui::update() {
     imgui_manager->new_frame();
 }
 
+std::string format_expiration_remaining(const std::string& timestamp)
+{
+    if (timestamp.empty())
+        return "-";
+
+    std::tm tm{};
+    std::istringstream iss(timestamp);
+    iss >> std::get_time(&tm, "%Y-%m-%d %H:%M:%S");
+    if (iss.fail())
+        return timestamp;
+
+    long microseconds = 0;
+    if (iss.peek() == '.')
+    {
+        iss.get();
+        std::string fractional;
+        std::getline(iss, fractional);
+        if (!fractional.empty())
+        {
+            while (fractional.size() < 6)
+                fractional.push_back('0');
+            try
+            {
+                microseconds = std::stol(fractional.substr(0, 6));
+            }
+            catch (...)
+            {
+                microseconds = 0;
+            }
+        }
+    }
+
+    time_t utc_time = _mkgmtime(&tm);
+    if (utc_time == static_cast<time_t>(-1))
+        return timestamp;
+
+    auto expiry_tp = std::chrono::system_clock::from_time_t(utc_time) + std::chrono::microseconds(microseconds);
+    auto now = std::chrono::system_clock::now();
+    if (expiry_tp <= now)
+        return "Expired";
+
+    auto remaining = std::chrono::duration_cast<std::chrono::seconds>(expiry_tp - now);
+    long long total_seconds = remaining.count();
+    long long days = total_seconds / 86400;
+    total_seconds %= 86400;
+    long long hours = total_seconds / 3600;
+    total_seconds %= 3600;
+    long long minutes = total_seconds / 60;
+    long long seconds = total_seconds % 60;
+
+    std::ostringstream oss;
+    oss << days << "d "
+        << std::setw(2) << std::setfill('0') << hours << "h "
+        << std::setw(2) << std::setfill('0') << minutes << "m "
+        << std::setw(2) << std::setfill('0') << seconds << "s";
+    return oss.str();
+}
+
 void c_loader_ui::render() {
     if (!initialized || !imgui_manager) {
         return;
@@ -99,49 +173,24 @@ void c_loader_ui::render() {
 }
 
 void c_loader_ui::render_auth_mode_window() {
-    if (!initialized || !imgui_manager) {
+    if (!initialized || !imgui_manager)
         return;
-    }
 
-    ImVec2 window_pos((float)GetSystemMetrics(SM_CXSCREEN) - 10.0f,
-        10.0f);
-    ImVec2 pivot(1.0f, 0.0f);
-    ImGui::SetNextWindowPos(window_pos, ImGuiCond_Always, pivot);
-    ImGui::SetNextWindowBgAlpha(0.85f);
-    ImGui::SetNextWindowSize(ImVec2(220.0f, 70.0f), ImGuiCond_FirstUseEver);
+    static bool set_once = false;
+    state.license_only_mode = false;
+    if (!set_once) {
 
-    if (ImGui::Begin("Authentication Mode##auth_mode_window",
-        nullptr,
-        ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoCollapse |
-        ImGuiWindowFlags_NoSavedSettings |
-        ImGuiWindowFlags_AlwaysAutoResize)) {
-
-        bool mode = state.license_only_mode;
-        if (ImGui::Checkbox("License-only login", &mode)) {
-            state.license_only_mode = mode;
-            if (auth_mode_callback) {
-                auth_mode_callback(mode);
-            }
-
-            if (mode) {
-                if (!state.authenticated) {
-                    show_main();
-                }
-            }
-            else {
-                if (!state.authenticated) {
-                    show_login();
-                }
-            }
+        if (auth_mode_callback) {
+            auth_mode_callback(false);
         }
 
-        ImGui::Spacing();
-        ImGui::TextUnformatted(mode
-            ? "Uses stored local account"
-            : "Manual username/password");
+        set_once = true;
     }
-    ImGui::End();
+
+    if (state.license_only_mode) {
+        if (!state.authenticated)
+            show_main();
+    }
 }
 
 void c_loader_ui::render_login_window() {
@@ -311,97 +360,147 @@ void c_loader_ui::render_register_window() {
 }
 
 void c_loader_ui::render_main_window() {
-    ImGui::SetNextWindowPos(ImVec2((float)GetSystemMetrics(SM_CXSCREEN) / 2, (float)GetSystemMetrics(SM_CYSCREEN) / 2),
-        ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(600, 400), ImGuiCond_FirstUseEver);
+    static int selected_subscription = -1;
+    ImGui::SetNextWindowSize(ImVec2(600, 400), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(
+        ImVec2(GetSystemMetrics(SM_CXSCREEN) * 0.5f, GetSystemMetrics(SM_CYSCREEN) * 0.5f),
+        ImGuiCond_Always, ImVec2(0.5f, 0.5f));
 
-    ImGui::Begin("Bootstrapper##main window", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    {
-        ImGuiIO& io = ImGui::GetIO();
-        auto colors = ImGui::GetStyle().Colors;
-
-        ImGui::BeginChild("##header", ImVec2(ImGui::GetWindowWidth() - 30, 45));
-        {
-            ImGui::GetWindowDrawList()->AddRectFilledMultiColor(ImGui::GetWindowPos(), ImGui::GetWindowPos() + ImGui::GetWindowSize(),
-                ImColor(colors[ImGuiCol_ChildBg]), ImColor(colors[ImGuiCol_ChildBg]),
-                darken(ImColor(colors[ImGuiCol_ChildBg])), darken(ImColor(colors[ImGuiCol_ChildBg])));
-
-            ImGui::PushFont(imgui_manager->get_font("title"));
-            int title_height = ImGui::CalcTextSize(config.application_name).y;
-            ImGui::SetCursorPos(ImVec2(5, title_height / 7));
-            ImGui::Text(config.application_name);
-            ImGui::PopFont();
-
-            ImGui::PushFont(imgui_manager->get_font("subtitle"));
-            ImGui::SetCursorPos(ImVec2(15, ImGui::GetCursorPosY() -
-                ImGui::CalcTextSize(user.username.c_str()).y / 1.8f));
-
-            ImGui::Text("Welcome %s", user.username.c_str());
-            ImGui::PopFont();
-            ImGui::EndChild();
-        }
-
-        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8);
-        ImGui::BeginChild("##body", ImVec2(ImGui::GetWindowWidth() - 30, ImGui::GetWindowHeight() - 118));
-        {
-
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 0, 0 });
-            for (auto sub : user.subscriptions) {
-                ImGui::BeginChild(sub->plan.c_str(), ImVec2(ImGui::GetWindowWidth(), 40), true,
-                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-
-                ImGui::GetWindowDrawList()->AddRectFilledMultiColor(ImGui::GetWindowPos(), ImGui::GetWindowPos() + ImGui::GetWindowSize(),
-                    ImColor(colors[ImGuiCol_ChildBg]), ImColor(colors[ImGuiCol_ChildBg]),
-                    darken(ImColor(colors[ImGuiCol_ChildBg]), 0.5f), darken(ImColor(colors[ImGuiCol_ChildBg]), 0.5f));
-
-                ImGui::PushFont(imgui_manager->get_font("subtitle"));
-                float height_from_bottom = ImGui::CalcTextSize("Expires at: %s Status: %s").y + 5;
-                ImGui::SetCursorPos(ImVec2(10, ImGui::GetWindowHeight() - height_from_bottom));
-                ImGui::Text("Expires at: %s", sub->expires_at.c_str());
-                ImGui::SameLine();
-                ImGui::Text(" Status: %s", sub->status.c_str());
-                ImGui::PopFont();
-
-                ImGui::PushFont(imgui_manager->get_font("smalltitle"));
-                ImGui::SetCursorPos(ImVec2(10, ImGui::GetWindowHeight() - height_from_bottom -
-                    ImGui::CalcTextSize(sub->plan.c_str()).y));
-                ImGui::Text("%s", sub->plan.c_str());
-                ImGui::PopFont();
-
-                ImGui::SetCursorPos(ImVec2(ImGui::GetWindowWidth() - 105, 5));
-                if (ImGui::Button("Launch", ImVec2(100, ImGui::GetWindowHeight() - 10)))
-                {
-                    if (filestream_callback && sub->plan == "Rust" && sub->status == "Active")
-                    {
-                        filestream_callback("4676609091914915"); // use correct id
-                    }
-                }
-                ImGui::EndChild();
-            }
-            ImGui::PopStyleVar();
-
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-            ImGui::EndChild();
-        }
-
-        ImGui::BeginChild("##redeembody", ImVec2(ImGui::GetWindowWidth() - 30, 25));
-        {
-            static char license_buffer[128];
-            ImGui::SetNextItemWidth(ImGui::GetWindowWidth() * 0.75f);
-            ImGui::InputTextWithHint("##license", "License", license_buffer, IM_ARRAYSIZE(license_buffer));
-            ImGui::SameLine();
-            if (ImGui::Button("Redeem", ImVec2(ImGui::GetWindowWidth() * 0.225f, 25))) {
-                if (license_callback && !user.username.empty() && strlen(license_buffer) > 0) {
-                    license_callback(user.username, std::string(license_buffer));
-                }
-            }
-            ImGui::EndChild();
-        }
-
+    static bool window_open = true;
+    if (!ImGui::Begin(config.application_name, &window_open, ImGuiWindowFlags_NoResize)) {
         ImGui::End();
+        return;
     }
+
+    if (!window_open) {
+        if (exit_callback) exit_callback();
+        close();
+        ImGui::End();
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (download_start_enqueued_ && now >= download_delay_until_)
+        trigger_pending_download();
+
+    ImGui::TextUnformatted("Products");
+    ImGui::Separator();
+
+    std::vector<user_subscription*> subs_snapshot;
+    for (auto* s : user.subscriptions)
+        if (s) subs_snapshot.push_back(s);
+
+    if (ImGui::BeginChild("product_list", ImVec2(-1.f, 200.f), true)) {
+        if (subs_snapshot.empty()) {
+            ImGui::TextDisabled("No subscriptions available.");
+        }
+        else {
+            for (int i = 0; i < subs_snapshot.size(); ++i) {
+                bool is_selected = (selected_subscription == i);
+                if (ImGui::Selectable(subs_snapshot[i]->plan.c_str(), is_selected))
+                    selected_subscription = i;
+            }
+        }
+    }
+    ImGui::EndChild();
+
+    ImGui::Separator();
+
+    if (!state.status_message.empty())
+        ImGui::TextColored(ImVec4(0.8f, 0.9f, 1.0f, 1.0f), "%s", state.status_message.c_str());
+    if (!state.error_message.empty())
+        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", state.error_message.c_str());
+
+    ImGui::Separator();
+
+    static char license_buffer[128] = "";
+    bool license_disabled = !license_callback || user.username.empty();
+    if (license_disabled) ImGui::BeginDisabled();
+    ImGui::InputTextWithHint("##license_input", "Enter license", license_buffer, IM_ARRAYSIZE(license_buffer));
+    if (ImGui::Button("Redeem License", ImVec2(-1.f, 0.f))) {
+        if (license_callback && license_buffer[0] != '\0') {
+            handle_license_redeem(license_buffer);
+            memset(license_buffer, 0, sizeof(license_buffer));
+        }
+    }
+    if (license_disabled) ImGui::EndDisabled();
+
+    ImGui::Separator();
+
+    user_subscription* selected_sub = nullptr;
+    if (selected_subscription >= 0 && selected_subscription < static_cast<int>(subs_snapshot.size()))
+        selected_sub = subs_snapshot[selected_subscription];
+
+    bool disable_load = load_animation_active_ || download_active_ || download_start_enqueued_;
+    if (disable_load) ImGui::BeginDisabled();
+
+    if (ImGui::Button("Load", ImVec2(-1.f, 0.f))) {
+        if (!selected_sub) {
+            state.error_message = "Select a product to load.";
+            state.status_message.clear();
+        }
+        else if (selected_sub->default_file_id.empty()) {
+            state.error_message = "No loader file is configured for this product.";
+            state.status_message.clear();
+        }
+        else {
+            load_animation_active_ = true;
+            load_animation_start_ = now;
+            load_animation_product_ = selected_sub->plan;
+            load_completion_popup_pending_ = false;
+            load_completion_message_.clear();
+            load_animation_stop_requested_ = false;
+            state.error_message.clear();
+            pending_file_id_ = selected_sub->default_file_id;
+            pending_product_name_ = selected_sub->plan;
+            download_start_enqueued_ = false;
+            download_delay_until_ = {};
+            download_active_ = false;
+            download_progress_ = 0.f;
+            state.status_message = "Loading (" + load_animation_product_ + ")";
+            license_success_active_ = false;
+            license_success_message_.clear();
+        }
+    }
+    if (disable_load) ImGui::EndDisabled();
+
+    if (load_animation_active_) {
+        float elapsed = std::chrono::duration<float>(now - load_animation_start_).count();
+        float progress = ImClamp(elapsed / kLoadAnimationDuration, 0.0f, 1.0f);
+        if (elapsed >= kLoadAnimationDuration) {
+            load_animation_active_ = false;
+            load_completion_popup_pending_ = true;
+            load_completion_message_ = "Launch complete.";
+        }
+        ImGui::Text("Loading %s...", load_animation_product_.c_str());
+        ImGui::ProgressBar(progress, ImVec2(-1.f, 0.f));
+    }
+    else if (download_active_) {
+        ImGui::Text("Downloading %s...", pending_product_name_.c_str());
+        ImGui::ProgressBar(ImClamp(download_progress_, 0.f, 1.f), ImVec2(-1.f, 0.f));
+    }
+
+    if (load_completion_popup_pending_) {
+        ImGui::OpenPopup("popup");
+        load_completion_popup_pending_ = false;
+    }
+
+    if (ImGui::BeginPopupModal("popup", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextWrapped("%s", load_completion_message_.c_str());
+        if (ImGui::Button("OK", ImVec2(120.f, 0.f))) {
+            ImGui::CloseCurrentPopup();
+            if (!pending_file_id_.empty()) {
+                download_delay_until_ = now + std::chrono::seconds(5);
+                download_start_enqueued_ = true;
+                download_progress_ = 0.f;
+                download_active_ = false;
+                state.status_message = "Preparing download for " + pending_product_name_;
+            }
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::End();
 }
 
 void c_loader_ui::apply_base_theme() {
@@ -475,6 +574,7 @@ void c_loader_ui::apply_base_theme() {
     style.Alpha = 0.95f;
 }
 
+
 void c_loader_ui::set_authenticated(bool auth, user_profile* new_profile) {
     state.authenticated = auth;
 
@@ -505,15 +605,59 @@ void c_loader_ui::set_authenticated(bool auth, user_profile* new_profile) {
 void c_loader_ui::set_status_message(const std::string& message) {
     state.status_message = message;
     state.error_message.clear();
+
+    if (license_redeem_pending_ && !message.empty()) {
+        license_success_active_ = true;
+        license_success_message_ = message;
+        license_success_start_ = std::chrono::steady_clock::now();
+        license_redeem_pending_ = false;
+    }
+
+    if (message.empty()) {
+        license_success_active_ = false;
+        license_success_message_.clear();
+    }
 }
 
 void c_loader_ui::set_error_message(const std::string& message) {
     state.error_message = message;
     state.status_message.clear();
+    license_redeem_pending_ = false;
+    license_success_active_ = false;
+    license_success_message_.clear();
+    load_animation_active_ = false;
+    load_animation_stop_requested_ = false;
+    load_completion_popup_pending_ = false;
+    load_completion_message_.clear();
+    load_animation_product_.clear();
+    pending_file_id_.clear();
+    pending_product_name_.clear();
+    download_start_enqueued_ = false;
+    download_active_ = false;
+    download_progress_ = 0.f;
 }
 
 void c_loader_ui::set_loading(bool active) {
+    if (active) {
+        download_active_ = true;
+        download_progress_ = 0.f;
+        if (!pending_product_name_.empty()) {
+            state.status_message = "Downloading " + pending_product_name_;
+        }
+        else {
+            state.status_message = "Downloading...";
+        }
+    }
+    else {
+        download_active_ = false;
+        download_progress_ = 0.f;
+        download_start_enqueued_ = false;
+        pending_product_name_.clear();
+    }
+}
 
+void c_loader_ui::set_loading_progress(float progress) {
+    download_progress_ = ImClamp(progress, 0.0f, 1.0f);
 }
 
 void c_loader_ui::show_login() {
@@ -610,6 +754,9 @@ void c_loader_ui::handle_launch_request(const std::string& file_id) {
 
 void c_loader_ui::handle_license_redeem(const std::string& license) {
     if (license_callback && !user.username.empty() && !license.empty()) {
+        license_redeem_pending_ = true;
+        license_success_active_ = false;
+        license_success_message_.clear();
         license_callback(user.username, license);
     }
 }
@@ -620,6 +767,23 @@ const std::vector<c_loader_ui::product_view>& c_loader_ui::get_product_views() c
 
 void c_loader_ui::release_product_views() {
 
+}
+
+void c_loader_ui::trigger_pending_download() {
+    if (pending_file_id_.empty()) {
+        download_start_enqueued_ = false;
+        return;
+    }
+
+    const std::string file_id = pending_file_id_;
+    pending_file_id_.clear();
+
+    download_start_enqueued_ = false;
+    download_delay_until_ = {};
+
+    if (!file_id.empty()) {
+        handle_launch_request(file_id);
+    }
 }
 
 void c_loader_ui::initialize_fallback_icons() {
@@ -648,6 +812,9 @@ void c_loader_ui::rebuild_product_views() {
 
 void c_loader_ui::close() {
     should_close = true;
+    if (imgui_manager) {
+        imgui_manager->set_should_close(true);
+    }
 }
 
 static void(*g_login_callback)(const char*, const char*) = nullptr;
@@ -707,6 +874,10 @@ extern "C" {
 
     LOADER_UI_API void ui_set_loading(c_loader_ui* ui, bool loading) {
         if (ui) ui->set_loading(loading);
+    }
+
+    LOADER_UI_API void ui_set_loading_progress(c_loader_ui* ui, float progress) {
+        if (ui) ui->set_loading_progress(progress);
     }
 
     LOADER_UI_API void ui_close(c_loader_ui* ui) {
